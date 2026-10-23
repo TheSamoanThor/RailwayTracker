@@ -3,6 +3,27 @@
 Отдельный модуль — чтобы легко менять данные без правки логики.
 """
 
+'''
+[out:json][timeout:300];
+// Ищем контур России
+area["ISO3166-1"="RU"] -> .searchArea;
+// Собираем все станции и остановочные пункты (точки)
+(
+  node["railway"~"station|halt"](area.searchArea);
+);
+out body;
+>;
+out skel qt;
+
+
+query for overpass-turbo.ue to get all rail stations from Russia
+
+or
+
+https://data.humdata.org/dataset/hotosm_rus_railways
+'''
+
+
 # Локальный справочник крупных узловых станций РФ.
 # Используется как офлайн-кэш: мгновенный отклик, работает без сети.
 # Формат: "название в нижнем регистре" -> (lat, lon)
@@ -89,3 +110,9 @@ CARGO_TYPES = [
     "Химикаты (танк-контейнеры)",
     "Продукты питания",
 ]
+
+# ─── Локальный справочник станций (офлайн) ───
+# Путь к GeoJSON с железнодорожными станциями РФ.
+# Файл скачивается отдельно (например, с HDX) и кладётся в папку data/.
+# Если файла нет — приложение работает как раньше (через Nominatim/Overpass).
+STATIONS_GEOJSON_PATH = "data/russia_railway_stations.geojson"

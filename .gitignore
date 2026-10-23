@@ -1,4 +1,31 @@
-__pycache__
+# files for local data saving
+
+Copy_Files_POSSIBLE_DANGER_RUN_ONLY_HERE.py
+start_copy.bat
+Project_Files.txt
+
+# code assembler
+node_modules
+package-lock.json
+package.json
+dist
+assembled_music_player.rar
 venv
-.env
+__pycache__
+
+# literally to-do)
+TODO.txt
+
+# sensetive files
+music.db
+/music
+*.sqlite
 *.db
+
+# too big and not so sensetive
+data/russia_railway_stations.geojson
+data/russia_railway_stations.json
+data/README.txt
+data/config.yaml
+data/config.yml
+data/metadata.json
