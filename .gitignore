@@ -17,10 +17,11 @@ __pycache__
 TODO.txt
 
 # sensetive files
-music.db
-/music
+data/transport.db
 *.sqlite
 *.db
+*.db-wal
+*.db-shm
 
 # too big and not so sensetive
 data/russia_railway_stations.geojson

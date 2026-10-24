@@ -17,6 +17,7 @@ import secrets
 import json
 from datetime import datetime, timezone
 from typing import Optional
+import os
 
 
 def generate_tracker() -> str:
@@ -34,12 +35,30 @@ def init_db() -> sqlite3.Connection:
     cargo_requests   — клиентские заявки на перевозку
     wagons           — вагоны в составе поезда
     station_cache    — кэш найденных станций (офлайн-повторы)
+    train_incidents  — инциденты/аномалии по составам
     """
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    # conn = sqlite3.connect(":memory:", check_same_thread=False)
+    # cur = conn.cursor()
+
+    # Указываем имя файла вместо ":memory:"
+    db_filename = "data/transport.db" 
+    
+    # Проверяем, существовал ли файл до подключения
+    is_new_db = not os.path.exists(db_filename)
+
+    # check_same_thread=False обязателен для работы внутри Streamlit
+    conn = sqlite3.connect(db_filename, check_same_thread=False)
+
+    # СТРОГО ВКЛЮЧАЕМ WAL-РЕЖИМ ДЛЯ ПАРАЛЛЕЛЬНОЙ РАБОТЫ ПОЛЬЗОВАТЕЛЕЙ
+    conn.execute("PRAGMA journal_mode=WAL;")
+
     cur = conn.cursor()
 
+    # Включаем поддержку внешних ключей (по умолчанию в SQLite она выключена)
+    cur.execute("PRAGMA foreign_keys = ON")
+
     cur.execute("""
-        CREATE TABLE container_trains (
+        CREATE TABLE IF NOT EXISTS container_trains (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             train_number    TEXT UNIQUE NOT NULL,
             lat             REAL NOT NULL,
@@ -49,7 +68,6 @@ def init_db() -> sqlite3.Connection:
             teu_capacity    INTEGER NOT NULL,
             teu_used        INTEGER NOT NULL DEFAULT 0,
             station_src     TEXT,
-            -- Симуляция движения:
             route_from_lat  REAL,
             route_from_lon  REAL,
             route_to_lat    REAL,
@@ -60,7 +78,7 @@ def init_db() -> sqlite3.Connection:
     """)
 
     cur.execute("""
-        CREATE TABLE cargo_requests (
+        CREATE TABLE IF NOT EXISTS cargo_requests (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             tracker       TEXT UNIQUE NOT NULL,
             client        TEXT NOT NULL,
@@ -75,7 +93,7 @@ def init_db() -> sqlite3.Connection:
     """)
 
     cur.execute("""
-        CREATE TABLE wagons (
+        CREATE TABLE IF NOT EXISTS wagons (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             train_id    INTEGER NOT NULL,
             wagon_no    TEXT NOT NULL,
@@ -88,9 +106,8 @@ def init_db() -> sqlite3.Connection:
         )
     """)
 
-    # Кэш станций: ключ — нормализованное имя, значение — координаты
     cur.execute("""
-        CREATE TABLE station_cache (
+        CREATE TABLE IF NOT EXISTS station_cache (
             name       TEXT PRIMARY KEY,
             lat        REAL NOT NULL,
             lon        REAL NOT NULL,
@@ -100,66 +117,79 @@ def init_db() -> sqlite3.Connection:
         )
     """)
 
-    # ─── Стартовый парк поездов на реальных ж/д узлах РФ ───
-    seed_trains = [
-        # (num, lat, lon, route, cargo, cap, used,
-        #  from_lat, from_lon, to_lat, to_lon, speed, departed_iso)
-        ("102M", 55.0350, 82.8970, "Владивосток - Москва",
-         "Бытовая техника и электроника", 120, 95,
-         43.1155, 131.8855, 55.7558, 37.6173, 65.0,
-         "2026-10-20T08:00:00+00:00"),
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS train_incidents (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            train_id      INTEGER NOT NULL,
+            incident_type TEXT NOT NULL,
+            description   TEXT,
+            severity      TEXT NOT NULL DEFAULT 'warning',
+            created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            resolved_at   TEXT,
+            is_active     INTEGER NOT NULL DEFAULT 1,
+            FOREIGN KEY (train_id) REFERENCES container_trains(id)
+        )
+    """)
+    conn.commit()
 
-        ("204Б", 56.8770, 60.5050, "Находка - Екатеринбург",
-         "Автокомпоненты", 96, 60,
-         42.8244, 132.8870, 56.8389, 60.6057, 55.0,
-         "2026-10-21T12:30:00+00:00"),
+    # Демо-заявки и трекеры для всех seed-составов.
+    # Первая заявка — на клиента "client", чтобы работал раздел «Мои заявки».
+    if is_new_db:
+        seed_trains = [
+            ("102M", 55.0350, 82.8970, "Владивосток - Москва", "Бытовая техника и электроника", 120, 95, 43.1155, 131.8855, 55.7558, 37.6173, 65.0, "2026-10-20T08:00:00+00:00"),
+            ("204Б", 56.8770, 60.5050, "Находка - Екатеринбург", "Автокомпоненты", 96, 60, 42.8244, 132.8870, 56.8389, 60.6057, 55.0, "2026-10-21T12:30:00+00:00"),
+            ("088А", 56.0340, 93.1250, "Китай - Брест (Транзит)", "Одежда и текстиль", 144, 144, 43.1155, 131.8855, 52.0976, 23.7341, 70.0, "2026-10-18T06:00:00+00:00"),
+            ("512В", 53.2120, 50.1830, "Хабаровск - Санкт-Петербург", "Промышленные станки", 80, 40, 48.4827, 135.0838, 59.9311, 30.3609, 60.0, "2026-10-22T04:15:00+00:00"),
+            ("301Х", 54.9810, 73.3180, "Владивосток - Новосибирск", "Химикаты (танк-контейнеры)", 110, 75, 43.1155, 131.8855, 55.0084, 82.9357, 58.0, "2026-10-19T18:00:00+00:00"),
+            ("999А_АНГАР", 64.0000, 80.0000, "Секретный маршрут", "Опасный спецгруз", 40, 40, None, None, None, None, 60.0, None),
+            ("777Х_УГОН", 62.0300, 129.7400, "Иркутск - Якутск (Сбой)", "Продукты питания", 64, 64, 52.2870, 104.3050, 62.0281, 129.7326, 50.0, "2026-10-23T00:00:00+00:00"),
+        ]
+        cur.executemany("""
+            INSERT INTO container_trains
+                (train_number, lat, lon, route, cargo_type, teu_capacity, teu_used, station_src,
+                 route_from_lat, route_from_lon, route_to_lat, route_to_lon, avg_speed_kmh, departed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'seed', ?, ?, ?, ?, ?, ?)
+        """, seed_trains)
 
-        ("088А", 56.0340, 93.1250, "Китай - Брест (Транзит)",
-         "Одежда и текстиль", 144, 144,
-         43.1155, 131.8855, 52.0976, 23.7341, 70.0,
-         "2026-10-18T06:00:00+00:00"),
+        demo_wagons = [
+            (1, "WG-102M-01", 1, "Бытовая техника и электроника", 22.5, 40, "ООО «ТехноМир»"),
+            (1, "WG-102M-02", 2, "Бытовая техника и электроника", 21.0, 35, "ООО «ЭлектроСбыт»"),
+            (1, "WG-102M-03", 3, "Комплектующие", 18.0, 20, "АО «Завод №5»"),
+            (2, "WG-204B-01", 1, "Автокомпоненты", 24.0, 30, "ООО «АвтоДеталь»"),
+            (2, "WG-204B-02", 2, "Автокомпоненты", 23.5, 30, "ООО «АвтоДеталь»"),
+            (3, "WG-088A-01", 1, "Одежда и текстиль", 22.0, 48, "ООО «МодаТранс»"),
+            (4, "WG-512V-01", 1, "Промышленные станки", 25.0, 20, "АО «СтанкоИмпорт»"),
+            (5, "WG-301X-01", 1, "Химикаты (танк-контейнеры)", 24.0, 25, "ООО «ХимТранс»"),
+            (6, "WG-999A-01", 1, "Опасный спецгруз", 30.0, 20, "Спецполучатель"),
+            (7, "WG-777X-01", 1, "Продукты питания", 20.0, 32, "ООО «ПродуктЛогистик»"),
+        ]
+        cur.executemany("""
+            INSERT INTO wagons (train_id, wagon_no, position, cargo_type, weight_t, teu, consignee)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, demo_wagons)
 
-        ("512В", 53.2120, 50.1830, "Хабаровск - Санкт-Петербург",
-         "Промышленные станки", 80, 40,
-         48.4827, 135.0838, 59.9311, 30.3609, 60.0,
-         "2026-10-22T04:15:00+00:00"),
+        seed_requests = [
+            ("RZ-2026-DEMO01", "client", "Владивосток - Москва", "Бытовая техника и электроника", 95, 1, "утверждена (в пути)"),
+            ("RZ-2026-DEMO02", "ООО «АвтоДеталь»", "Находка - Екатеринбург", "Автокомпоненты", 60, 2, "прикреплена к составу"),
+            ("RZ-2026-DEMO03", "ООО «ТекстильТранс»", "Китай - Брест (Транзит)", "Одежда и текстиль", 144, None, "на рассмотрении"),
+            ("RZ-2026-DEMO04", "АО «СтанкоИмпорт»", "Хабаровск - Санкт-Петербург", "Промышленные станки", 40, 4, "прикреплена к составу"),
+            ("RZ-2026-DEMO05", "ООО «ХимТранс»", "Владивосток - Новосибирск", "Химикаты (танк-контейнеры)", 75, None, "на рассмотрении"),
+            ("RZ-2026-DEMO06", "Спецклиент", "Секретный маршрут", "Опасный спецгруз", 40, 6, "прикреплена к составу"),
+            ("RZ-2026-DEMO07", "ООО «ПродуктЛогистик»", "Иркутск - Якутск (Сбой)", "Продукты питания", 64, 7, "прикреплена к составу"),
+        ]
+        cur.executemany("""
+            INSERT INTO cargo_requests (tracker, client, route, cargo_type, teu_requested, train_id, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, seed_requests)
 
-        ("301Х", 54.9810, 73.3180, "Владивосток - Новосибирск",
-         "Химикаты (танк-контейнеры)", 110, 75,
-         43.1155, 131.8855, 55.0084, 82.9357, 58.0,
-         "2026-10-19T18:00:00+00:00"),
-
-        # Выбросы (специально для демонстрации фильтрации)
-        ("999А_АНГАР", 64.0000, 80.0000, "Секретный маршрут",
-         "Опасный спецгруз", 40, 40,
-         None, None, None, None, 60.0, None),
-
-        ("777Х_УГОН", 62.0300, 129.7400, "Иркутск - Якутск (Сбой)",
-         "Продукты питания", 64, 64,
-         52.2870, 104.3050, 62.0281, 129.7326, 50.0,
-         "2026-10-23T00:00:00+00:00"),
-    ]
-    cur.executemany("""
-        INSERT INTO container_trains
-            (train_number, lat, lon, route, cargo_type, teu_capacity, teu_used,
-             station_src, route_from_lat, route_from_lon,
-             route_to_lat, route_to_lon, avg_speed_kmh, departed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'seed',
-                ?, ?, ?, ?, ?, ?)
-    """, seed_trains)
-
-    # ─── Демо-вагоны для первых поездов ───
-    demo_wagons = [
-        (1, "WG-102M-01", 1, "Бытовая техника и электроника", 22.5, 40, "ООО «ТехноМир»"),
-        (1, "WG-102M-02", 2, "Бытовая техника и электроника", 21.0, 35, "ООО «ЭлектроСбыт»"),
-        (1, "WG-102M-03", 3, "Комплектующие", 18.0, 20, "АО «Завод №5»"),
-        (2, "WG-204B-01", 1, "Автокомпоненты", 24.0, 30, "ООО «АвтоДеталь»"),
-        (2, "WG-204B-02", 2, "Автокомпоненты", 23.5, 30, "ООО «АвтоДеталь»"),
-    ]
-    cur.executemany("""
-        INSERT INTO wagons (train_id, wagon_no, position, cargo_type, weight_t, teu, consignee)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, demo_wagons)
+        seed_incidents = [
+            (6, "Аварийная остановка", "Состав вне основного коридора, связь нестабильна.", "warning"),
+            (7, "Угон / потеря контроля", "Состав отклонился от маршрута Иркутск — Якутск; требуется проверка диспетчера.", "critical"),
+        ]
+        cur.executemany("""
+            INSERT INTO train_incidents (train_id, incident_type, description, severity, is_active)
+            VALUES (?, ?, ?, ?, 1)
+        """, seed_incidents)
 
     conn.commit()
     return conn
@@ -229,20 +259,32 @@ def add_train(conn, num: str, lat: float, lon: float, route: str,
 # CRUD: заявки
 # ═══════════════════════════════════════════════
 
-def find_matching_train(conn, route: str, teu_requested: int) -> Optional[tuple]:
+def _norm_route(route: str) -> str:
+    """Нормализует маршрут для сравнения: регистр, пробелы, тире."""
+    if not route:
+        return ""
+    route = route.replace("—", "-").replace("–", "-").replace("−", "-")
+    return " ".join(route.lower().split())
+
+
+def find_matching_train(conn, route: str, teu_requested: int):
     """
-    Ищет поезд с тем же маршрутом и достаточной свободной ёмкостью.
-    Сортировка: сначала самый «заполненный» (плотная упаковка).
+    Ищет поезд с тем же маршрутом (с нормализацией) и достаточной
+    свободной ёмкостью. Сортировка: сначала самый «заполненный».
     """
     cur = conn.cursor()
     cur.execute("""
-        SELECT id, teu_capacity, teu_used
+        SELECT id, route, teu_capacity, teu_used
         FROM container_trains
-        WHERE route = ? AND (teu_capacity - teu_used) >= ?
+        WHERE (teu_capacity - teu_used) >= ?
         ORDER BY (teu_capacity - teu_used) ASC
-        LIMIT 1
-    """, (route, teu_requested))
-    return cur.fetchone()
+    """, (teu_requested,))
+
+    target = _norm_route(route)
+    for row in cur.fetchall():
+        if _norm_route(row[1]) == target:
+            return (row[0], row[2], row[3])
+    return None
 
 
 def add_request_aggregated(conn, client: str, route: str, cargo: str,
@@ -263,16 +305,46 @@ def add_request_aggregated(conn, client: str, route: str, cargo: str,
 
 
 def add_request_pending(conn, client: str, route: str, cargo: str, teu: int) -> str:
-    """Создаёт заявку, ожидающую агрегации. Возвращает tracker."""
+    """Создаёт новую клиентскую заявку со статусом 'на рассмотрении'."""
     tracker = generate_tracker()
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO cargo_requests
-            (tracker, client, route, cargo_type, teu_requested, train_id, status)
-        VALUES (?, ?, ?, ?, ?, NULL, 'ожидает агрегации')
+        INSERT INTO cargo_requests (tracker, client, route, cargo_type, teu_requested, train_id, status)
+        VALUES (?, ?, ?, ?, ?, NULL, 'на рассмотрении')
     """, (tracker, client, route, cargo, teu))
     conn.commit()
     return tracker
+
+
+def get_pending_requests(conn) -> list:
+    """Возвращает все заявки, ожидающие решения админа."""
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, tracker, client, route, cargo_type, teu_requested, created_at
+        FROM cargo_requests WHERE status = 'на рассмотрении' ORDER BY id DESC
+    """)
+    return cur.fetchall()
+
+
+def approve_request(conn, req_id: int, train_id: int, teu: int) -> None:
+    """Утверждает заявку: привязывает к поезду, меняет статус и резервирует TEU."""
+    cur = conn.cursor()
+    # Увеличиваем загрузку поезда
+    cur.execute("UPDATE container_trains SET teu_used = teu_used + ? WHERE id = ?", (teu, train_id))
+    # Обновляем статус заявки
+    cur.execute("""
+        UPDATE cargo_requests 
+        SET status = 'утверждена (распределена)', train_id = ? 
+        WHERE id = ?
+    """, (train_id, req_id))
+    conn.commit()
+
+
+def reject_request(conn, req_id: int) -> None:
+    """Отклоняет заявку."""
+    cur = conn.cursor()
+    cur.execute("UPDATE cargo_requests SET status = 'отклонена' WHERE id = ?", (req_id,))
+    conn.commit()
 
 
 def get_all_requests(conn) -> list:
@@ -322,6 +394,103 @@ def get_client_requests(conn, client: str) -> list:
         WHERE LOWER(r.client) = LOWER(?)
         ORDER BY r.id DESC
     """, (client,))
+    return cur.fetchall()
+
+
+# ═══════════════════════════════════════════════
+# CRUD: проблемы
+# ═══════════════════════════════════════════════
+
+
+def report_train_incident(conn, train_id: int, incident_type: str,
+                          description: str = "",
+                          severity: str = "warning"):
+    """
+    Фиксирует инцидент по составу.
+    Если incident_type == "В пределах нормы" — закрывает активные инциденты
+    и не создаёт новый.
+    Возвращает id нового инцидента или None.
+    """
+    cur = conn.cursor()
+
+    # Закрываем предыдущие активные инциденты
+    cur.execute("""
+        UPDATE train_incidents
+        SET is_active = 0, resolved_at = datetime('now')
+        WHERE train_id = ? AND is_active = 1
+    """, (train_id,))
+
+    if incident_type.strip().lower() in ("в пределах нормы", "норма", "ok", "resolved"):
+        conn.commit()
+        return None
+
+    cur.execute("""
+        INSERT INTO train_incidents
+            (train_id, incident_type, description, severity, is_active)
+        VALUES (?, ?, ?, ?, 1)
+    """, (train_id, incident_type, description, severity))
+    conn.commit()
+    return cur.lastrowid
+
+
+def resolve_train_incidents(conn, train_id: int) -> None:
+    """Закрывает все активные инциденты по составу."""
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE train_incidents
+        SET is_active = 0, resolved_at = datetime('now')
+        WHERE train_id = ? AND is_active = 1
+    """, (train_id,))
+    conn.commit()
+
+
+def get_active_incident(conn, train_id: int):
+    """
+    Возвращает активный инцидент по составу:
+    (id, train_id, incident_type, description, severity, created_at)
+    или None.
+    """
+    if train_id is None:
+        return None
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, train_id, incident_type, description, severity, created_at
+        FROM train_incidents
+        WHERE train_id = ? AND is_active = 1
+        ORDER BY id DESC
+        LIMIT 1
+    """, (train_id,))
+    return cur.fetchone()
+
+
+def get_incidents(conn, train_id: Optional[int] = None, limit: int = 50):
+    """
+    Журнал инцидентов.
+    Если train_id=None — по всем составам.
+    Возвращает:
+    (id, train_number, incident_type, description, severity,
+     created_at, resolved_at, is_active)
+    """
+    cur = conn.cursor()
+    if train_id is None:
+        cur.execute("""
+            SELECT i.id, t.train_number, i.incident_type, i.description,
+                   i.severity, i.created_at, i.resolved_at, i.is_active
+            FROM train_incidents i
+            JOIN container_trains t ON t.id = i.train_id
+            ORDER BY i.id DESC
+            LIMIT ?
+        """, (limit,))
+    else:
+        cur.execute("""
+            SELECT i.id, t.train_number, i.incident_type, i.description,
+                   i.severity, i.created_at, i.resolved_at, i.is_active
+            FROM train_incidents i
+            JOIN container_trains t ON t.id = i.train_id
+            WHERE i.train_id = ?
+            ORDER BY i.id DESC
+            LIMIT ?
+        """, (train_id, limit))
     return cur.fetchall()
 
 

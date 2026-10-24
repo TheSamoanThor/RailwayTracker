@@ -10,8 +10,8 @@ def _h(pwd: str) -> str:
 
 # username -> (password_hash, role)
 USERS = {
-    "admin":  (_h("admin123"), "admin"),
-    "client": (_h("client123"), "client"),
+    "admin":  (_h("a"), "admin"),
+    "client": (_h("c"), "client"),
 }
 
 def authenticate(username: str, password: str) -> Optional[str]:
