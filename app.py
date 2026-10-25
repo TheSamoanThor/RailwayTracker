@@ -35,7 +35,7 @@ from routing import RailGraph
 st.set_page_config(
     layout="wide",
     page_title="Мониторинг контейнерных перевозок",
-    page_icon="*",
+    page_icon="🚂",
 )
 
 # ═══════════════════════════════════════════════

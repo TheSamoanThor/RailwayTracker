@@ -73,13 +73,19 @@ def build_rail_map(center: tuple, trains: list, valid_ids: list,
             line_coords = [[f_lat, f_lon], [t_lat, t_lon]]
             if route_path_json:
                 try:
-                    line_coords = json.loads(route_path_json)
+                    raw_path = json.loads(route_path_json)
+                    # Явно проверяем и при необходимости меняем порядок на [lat, lon]
+                    # (если первый элемент больше 90, то это, скорее всего, долгота)
+                    if raw_path and len(raw_path) > 0 and abs(raw_path[0][0]) > 90:
+                        line_coords = [[p[1], p[0]] for p in raw_path]
+                    else:
+                        line_coords = raw_path
                 except Exception:
                     pass
-                    
+            
             folium.PolyLine(
                 locations=line_coords,
-                color="gray", weight=2, opacity=0.4, dash_array="5, 5"
+                color="blue", weight=3, opacity=0.6, dash_array="5, 5"
             ).add_to(m)
 
         lat, lon, _prog, _eta, _tot, _trv = train_position(
@@ -145,12 +151,18 @@ def build_single_train_map(train_row, popup_title: str = "Поезд",
         line_coords = [[f_lat, f_lon], [t_lat, t_lon]]
         if route_path_json:
             try:
-                line_coords = json.loads(route_path_json)
+                raw_path = json.loads(route_path_json)
+                # Явно проверяем и при необходимости меняем порядок на [lat, lon]
+                # (если первый элемент больше 90, то это, скорее всего, долгота)
+                if raw_path and len(raw_path) > 0 and abs(raw_path[0][0]) > 90:
+                    line_coords = [[p[1], p[0]] for p in raw_path]
+                else:
+                    line_coords = raw_path
             except Exception:
                 pass
                 
         folium.PolyLine(line_coords,
-                        color="blue", weight=3, opacity=0.5, dash_array="8, 8").add_to(m)
+                        color="blue", weight=3, opacity=0.6, dash_array="8, 8").add_to(m)
 
     folium.Marker(
         [lat, lon],

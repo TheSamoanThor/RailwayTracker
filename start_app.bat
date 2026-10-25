@@ -15,6 +15,6 @@ echo Активация виртуального окружения (Python 3.12
 call .venv\Scripts\activate.bat
 
 echo Запуск приложения...
-streamlit run app.py
+streamlit run app.py --server.enableStaticServing=false
 
 pause
