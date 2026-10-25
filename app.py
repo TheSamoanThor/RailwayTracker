@@ -27,6 +27,7 @@ from ui_components import (
     render_analytics_panel, render_client_tracking,
     render_wagon_manifest, render_incident_manager,
 )
+from routing import RailGraph
 
 # ═══════════════════════════════════════════════
 # Настройка страницы
@@ -67,6 +68,13 @@ user = st.session_state.user
 # ═══════════════════════════════════════════════
 # БД + загрузка локального справочника станций
 # ═══════════════════════════════════════════════
+@st.cache_resource(show_spinner="Построение графа ЖД путей (может занять минуту)...")
+def get_rail_graph():
+    return RailGraph(STATIONS_GEOJSON_PATH)
+
+rail_graph = get_rail_graph()
+
+
 @st.cache_resource(show_spinner=False)
 def get_db_connection():
     """
@@ -366,24 +374,36 @@ if user["role"] == "admin":
                         dist_km = haversine_km(final_from_lat, final_from_lon, final_to_lat, final_to_lon)
                         if dist_km < 1.0:
                             st.error("Станции находятся слишком близко (менее 1 км). Поезду некуда ехать.")
-                        elif dist_km > 12000:
-                            st.warning(f"Расстояние по прямой очень велико ({dist_km:.0f} км). "
-                                       f"Проверьте правильность ввода координат.")
-                        
-                        # Сохраняем поезд
-                        route_string = f"{from_station.strip()} - {to_station.strip()}"
-                        ok, msg = add_train(
-                            conn, new_num.strip(), final_from_lat, final_from_lon,
-                            route_string, new_cargo, new_teu, src,
-                            from_lat=final_from_lat, from_lon=final_from_lon,
-                            to_lat=final_to_lat, to_lon=final_to_lon,
-                        )
-                        if ok:
-                            st.success(f"Состав № {new_num} зарегистрирован. Поезд в пути!")
-                            time.sleep(1.0)
-                            st.rerun()
                         else:
-                            st.error(msg)
+                            # ИЩЕМ РЕАЛЬНЫЙ ЖД МАРШРУТ
+                            with st.spinner("Прокладка маршрута по реальным ЖД путям..."):
+                                route_coords = rail_graph.get_rail_route(
+                                    final_from_lat, final_from_lon, 
+                                    final_to_lat, final_to_lon
+                                )
+                            
+                            if not route_coords:
+                                st.warning("Не удалось найти прямой ЖД путь между этими станциями. Будет использована прямая линия.")
+                                # В случае неудачи используем прямую линию
+                                route_coords = [[final_from_lat, final_from_lon], [final_to_lat, final_to_lon]]
+                            else:
+                                st.success(f"Маршрут успешно проложен! Узлов на пути: {len(route_coords)}")
+
+                            # Сохраняем поезд
+                            route_string = f"{from_station.strip()} - {to_station.strip()}"
+                            ok, msg = add_train(
+                                conn, new_num.strip(), final_from_lat, final_from_lon,
+                                route_string, new_cargo, new_teu, src,
+                                from_lat=final_from_lat, from_lon=final_from_lon,
+                                to_lat=final_to_lat, to_lon=final_to_lon,
+                                route_path=route_coords # <--- ПЕРЕДАЕМ МАРШРУТ
+                            )
+                            if ok:
+                                st.success(f"Состав № {new_num} зарегистрирован. Поезд в пути!")
+                                time.sleep(1.5)
+                                st.rerun()
+                            else:
+                                st.error(msg)
 
         st.markdown("### Текущий парк составов")
         if raw_trains:

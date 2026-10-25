@@ -11,6 +11,7 @@ package.json
 dist
 assembled_music_player.rar
 venv
+.venv
 __pycache__
 
 # literally to-do)

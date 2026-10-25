@@ -1,12 +1,12 @@
 """
 Симуляция движения поезда между двумя узловыми станциями.
-Модель: равномерное прямолинейное движение по отрезку
-(линейная интерполяция координат).
+Модель: равномерное движение вдоль ломаной линии (реального ЖД пути).
 """
 
 import math
+import json
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 EARTH_R_KM = 6371.0
 
@@ -33,14 +33,12 @@ def position_at(route_from: Tuple[float, float],
                 route_to: Tuple[float, float],
                 avg_speed_kmh: float,
                 departed_at_iso: str,
+                route_path: Optional[List[List[float]]] = None,
                 now: Optional[datetime] = None):
     """
     Вычисляет текущую позицию поезда.
-
-    Возвращает:
-        (lat, lon, progress [0..1], eta_minutes, total_km, traveled_km)
-    Если маршрут вырожден или время отправления некорректно —
-    возвращает конечную точку с progress=1.0.
+    Если передан route_path, движение идет вдоль ломаной линии.
+    Иначе — по прямой между route_from и route_to.
     """
     now = now or datetime.now(timezone.utc)
 
@@ -52,26 +50,50 @@ def position_at(route_from: Tuple[float, float],
     if departed.tzinfo is None:
         departed = departed.replace(tzinfo=timezone.utc)
 
-    total_km = haversine_km(route_from[0], route_from[1],
-                            route_to[0], route_to[1])
+    # Собираем полный список точек (от начала до конца)
+    if not route_path or len(route_path) < 2:
+        route_path = [list(route_from), list(route_to)]
+
+    # 1. Считаем общую длину маршрута и длины каждого сегмента
+    segment_lengths = []
+    total_km = 0.0
+    for i in range(len(route_path) - 1):
+        p1 = route_path[i]
+        p2 = route_path[i + 1]
+        dist = haversine_km(p1[0], p1[1], p2[0], p2[1])
+        segment_lengths.append(dist)
+        total_km += dist
+
     if total_km < 1e-6:
         return (route_to[0], route_to[1], 1.0, 0.0, 0.0, 0.0)
 
+    # 2. Вычисляем пройденное расстояние
     elapsed_h = max(0.0, (now - departed).total_seconds() / 3600.0)
     traveled_km = min(total_km, avg_speed_kmh * elapsed_h)
     progress = traveled_km / total_km
     eta_min = max(0.0, (total_km - traveled_km) / max(avg_speed_kmh, 0.1) * 60.0)
 
-    lat, lon = interpolate(route_from[0], route_from[1],
-                           route_to[0], route_to[1], progress)
+    # 3. Находим текущий сегмент и интерполируем точку
+    accumulated = 0.0
+    lat, lon = route_path[-1][0], route_path[-1][1]  # По умолчанию - конец
+
+    for i in range(len(segment_lengths)):
+        seg_len = segment_lengths[i]
+        if accumulated + seg_len >= traveled_km:
+            # Поезд находится на этом отрезке
+            dist_on_segment = traveled_km - accumulated
+            frac = dist_on_segment / seg_len if seg_len > 0 else 0
+            p1 = route_path[i]
+            p2 = route_path[i + 1]
+            lat, lon = interpolate(p1[0], p1[1], p2[0], p2[1], frac)
+            break
+        accumulated += seg_len
+
     return lat, lon, progress, eta_min, total_km, traveled_km
 
 
 def simulation_now(offset_minutes: float = 0.0) -> datetime:
-    """
-    Текущее «время симуляции»:
-    реальное UTC-время + сдвиг в минутах.
-    """
+    """Текущее «время симуляции»: реальное UTC-время + сдвиг в минутах."""
     return datetime.now(timezone.utc) + timedelta(minutes=offset_minutes)
 
 
@@ -93,10 +115,18 @@ def train_position(train_row, simulation_enabled: bool = True,
     """
     (t_id, t_num, lat, lon, route, cargo,
      teu_cap, teu_used, src,
-     f_lat, f_lon, t_lat, t_lon, speed, departed) = train_row
+     f_lat, f_lon, t_lat, t_lon, speed, departed, route_path_json) = train_row
 
     if not simulation_enabled:
         return lat, lon, 0.0, 0.0, 0.0, 0.0
+
+    # Парсим JSON с маршрутом
+    route_path = None
+    if route_path_json:
+        try:
+            route_path = json.loads(route_path_json)
+        except (TypeError, json.JSONDecodeError):
+            pass
 
     if all(v is not None for v in (f_lat, f_lon, t_lat, t_lon, departed)):
         return position_at(
@@ -104,6 +134,7 @@ def train_position(train_row, simulation_enabled: bool = True,
             (t_lat, t_lon),
             speed or 60.0,
             departed,
+            route_path=route_path,
             now=now,
         )
 

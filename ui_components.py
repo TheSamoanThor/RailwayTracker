@@ -25,6 +25,7 @@ def build_rail_map(center: tuple, trains: list, valid_ids: list,
     """
     Строит карту Folium с линиями маршрутов, станциями и поездами.
     """
+    import json
     m = folium.Map(
         location=[center[0], center[1]],
         zoom_start=4,
@@ -53,8 +54,9 @@ def build_rail_map(center: tuple, trains: list, valid_ids: list,
         route, cargo = t[4], t[5]
         teu_cap, teu_used = t[6], t[7]
         f_lat, f_lon, t_lat, t_lon = t[9], t[10], t[11], t[12]
+        route_path_json = t[15] if len(t) > 15 else None
 
-        # Отрисовка линии маршрута
+        # Отрисовка станций и линии маршрута
         if all(v is not None for v in (f_lat, f_lon, t_lat, t_lon)):
             # Начальная точка маршрута
             folium.CircleMarker(
@@ -66,9 +68,17 @@ def build_rail_map(center: tuple, trains: list, valid_ids: list,
                 location=[t_lat, t_lon], radius=4, color="gray", fill=True,
                 popup=f"Станция назначения (Поезд {t_num})"
             ).add_to(m)
-            # Линия
+            
+            # Если есть реальный путь - рисуем его. Если нет - прямую.
+            line_coords = [[f_lat, f_lon], [t_lat, t_lon]]
+            if route_path_json:
+                try:
+                    line_coords = json.loads(route_path_json)
+                except Exception:
+                    pass
+                    
             folium.PolyLine(
-                locations=[[f_lat, f_lon], [t_lat, t_lon]],
+                locations=line_coords,
                 color="gray", weight=2, opacity=0.4, dash_array="5, 5"
             ).add_to(m)
 
@@ -108,12 +118,10 @@ def render_map(map_obj, height: int = 530):
 
 def build_single_train_map(train_row, popup_title: str = "Поезд",
                            now=None, simulation_enabled: bool = True):
-    """
-    Карта с одной позицией (для клиента) + линия маршрута.
-    """
+    import json
     (t_id, t_num, lat, lon, route, cargo,
      teu_cap, teu_used, src,
-     f_lat, f_lon, t_lat, t_lon, speed, departed) = train_row
+     f_lat, f_lon, t_lat, t_lon, speed, departed, route_path_json) = train_row
 
     lat, lon, prog, eta, tot, trv = train_position(
         train_row, simulation_enabled=simulation_enabled, now=now
@@ -128,13 +136,20 @@ def build_single_train_map(train_row, popup_title: str = "Поезд",
         name="ЖД", overlay=False,
     ).add_to(m)
 
-    # Отрисовка маршрута, если есть координаты
     if all(v is not None for v in (f_lat, f_lon, t_lat, t_lon)):
         folium.CircleMarker([f_lat, f_lon], radius=5, color="green", fill=True,
                             popup="Станция отправления").add_to(m)
         folium.CircleMarker([t_lat, t_lon], radius=5, color="red", fill=True,
                             popup="Станция назначения").add_to(m)
-        folium.PolyLine([[f_lat, f_lon], [t_lat, t_lon]],
+        
+        line_coords = [[f_lat, f_lon], [t_lat, t_lon]]
+        if route_path_json:
+            try:
+                line_coords = json.loads(route_path_json)
+            except Exception:
+                pass
+                
+        folium.PolyLine(line_coords,
                         color="blue", weight=3, opacity=0.5, dash_array="8, 8").add_to(m)
 
     folium.Marker(
@@ -153,12 +168,11 @@ def render_client_tracking(req_row, incident=None, now=None,
                            simulation_enabled: bool = True):
     """
     Экран клиента: информация о заказе + карта + метрики + инцидент.
-    req_row — результат find_request_by_tracker.
-    incident — результат get_active_incident() или None.
+    req_row — результат find_request_by_tracker (уже содержит route_path).
     """
     (rid, tracker, client, route, cargo, teu, status,
      train_id, num, lat, lon,
-     f_lat, f_lon, t_lat, t_lon, speed, departed) = req_row
+     f_lat, f_lon, t_lat, t_lon, speed, departed, route_path_json) = req_row
 
     st.subheader(f"Заказ {tracker}")
     st.write(f"**Клиент:** {client}")
@@ -180,9 +194,10 @@ def render_client_tracking(req_row, incident=None, now=None,
                    "Позиция появится после формирования поезда.")
         return
 
+    # Формируем кортеж для карты (добавили route_path_json в конец)
     train_row = (train_id, num, lat, lon, route, cargo,
                  0, 0, "db",
-                 f_lat, f_lon, t_lat, t_lon, speed, departed)
+                 f_lat, f_lon, t_lat, t_lon, speed, departed, route_path_json)
 
     m, prog, eta, tot, trv = build_single_train_map(
         train_row, f"Заказ {tracker}",

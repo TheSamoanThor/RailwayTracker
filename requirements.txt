@@ -1,3 +1,4 @@
 streamlit>=1.30
 folium>=0.15
 streamlit-folium>=0.18
+networkx>=3.0

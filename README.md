@@ -13,6 +13,8 @@
 
 ## Запуск
 
+Запуск производится в следующем порядке:
 ```bash
-pip install -r requirements.txt
-streamlit run app.py
+setup_data.bat
+setup.bat
+start_app.bat

@@ -87,7 +87,8 @@ def init_db() -> sqlite3.Connection:
             route_to_lat    REAL,
             route_to_lon    REAL,
             avg_speed_kmh   REAL DEFAULT 60.0,
-            departed_at     TEXT
+            departed_at     TEXT,
+            route_path      TEXT
         )
     """)
 
@@ -231,7 +232,7 @@ def get_all_trains(conn) -> list:
         SELECT id, train_number, lat, lon, route, cargo_type,
                teu_capacity, teu_used, station_src,
                route_from_lat, route_from_lon, route_to_lat, route_to_lon,
-               avg_speed_kmh, departed_at
+               avg_speed_kmh, departed_at, route_path
         FROM container_trains
     """)
     return cur.fetchall()
@@ -256,7 +257,8 @@ def add_train(conn, num: str, lat: float, lon: float, route: str,
               to_lat: Optional[float] = None,
               to_lon: Optional[float] = None,
               speed_kmh: float = 60.0,
-              departed_at: Optional[str] = None) -> tuple[bool, str]:
+              departed_at: Optional[str] = None,
+              route_path: Optional[list] = None) -> tuple[bool, str]:
     """
     Добавляет новый поезд.
     Возвращает (успех, сообщение).
@@ -265,15 +267,20 @@ def add_train(conn, num: str, lat: float, lon: float, route: str,
         cur = conn.cursor()
         if departed_at is None:
             departed_at = datetime.now(timezone.utc).isoformat()
+            
+        # Сериализуем список координат в JSON-строку
+        import json
+        path_json = json.dumps(route_path) if route_path else None
+
         cur.execute("""
             INSERT INTO container_trains
                 (train_number, lat, lon, route, cargo_type,
                  teu_capacity, teu_used, station_src,
                  route_from_lat, route_from_lon, route_to_lat, route_to_lon,
-                 avg_speed_kmh, departed_at)
-            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+                 avg_speed_kmh, departed_at, route_path)
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (num, lat, lon, route, cargo, teu_capacity, station_src,
-              from_lat, from_lon, to_lat, to_lon, speed_kmh, departed_at))
+              from_lat, from_lon, to_lat, to_lon, speed_kmh, departed_at, path_json))
         conn.commit()
         return True, "OK"
     except sqlite3.IntegrityError:
@@ -391,7 +398,7 @@ def find_request_by_tracker(conn, tracker: str):
     Возвращает расширенный кортеж с полями поезда для симуляции:
       (req_id, tracker, client, route, cargo, teu, status,
        train_id, train_number, lat, lon,
-       from_lat, from_lon, to_lat, to_lon, speed, departed_at)
+       from_lat, from_lon, to_lat, to_lon, speed, departed_at, route_path)
     """
     cur = conn.cursor()
     cur.execute("""
@@ -400,7 +407,7 @@ def find_request_by_tracker(conn, tracker: str):
                t.id, t.train_number, t.lat, t.lon,
                t.route_from_lat, t.route_from_lon,
                t.route_to_lat, t.route_to_lon,
-               t.avg_speed_kmh, t.departed_at
+               t.avg_speed_kmh, t.departed_at, t.route_path
         FROM cargo_requests r
         LEFT JOIN container_trains t ON t.id = r.train_id
         WHERE UPPER(r.tracker) = UPPER(?)
