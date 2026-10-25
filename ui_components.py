@@ -3,9 +3,9 @@
 Убирает дублирование кода из app.py.
 
 Добавлены:
-  • build_single_train_map — карта для клиента (один поезд)
-  • render_client_tracking — экран слежения по трекеру
-  • render_wagon_manifest — состав вагонов (админ)
+build_single_train_map — карта для клиента (один поезд)
+render_client_tracking — экран слежения по трекеру
+render_wagon_manifest — состав вагонов (админ)
 """
 
 import folium
@@ -23,10 +23,7 @@ def build_rail_map(center: tuple, trains: list, valid_ids: list,
                    avg_distance: float, threshold: float, multiplier: float,
                    now=None, simulation_enabled: bool = True):
     """
-    Строит карту Folium с:
-      • слоем железных дорог OpenRailMap
-      • маркером центра масс
-      • маркерами поездов (зелёные — норма, красные — выбросы)
+    Строит карту Folium с линиями маршрутов, станциями и поездами.
     """
     m = folium.Map(
         location=[center[0], center[1]],
@@ -55,6 +52,25 @@ def build_rail_map(center: tuple, trains: list, valid_ids: list,
         t_id, t_num = t[0], t[1]
         route, cargo = t[4], t[5]
         teu_cap, teu_used = t[6], t[7]
+        f_lat, f_lon, t_lat, t_lon = t[9], t[10], t[11], t[12]
+
+        # Отрисовка линии маршрута
+        if all(v is not None for v in (f_lat, f_lon, t_lat, t_lon)):
+            # Начальная точка маршрута
+            folium.CircleMarker(
+                location=[f_lat, f_lon], radius=4, color="gray", fill=True,
+                popup=f"Станция отправления (Поезд {t_num})"
+            ).add_to(m)
+            # Конечная точка маршрута
+            folium.CircleMarker(
+                location=[t_lat, t_lon], radius=4, color="gray", fill=True,
+                popup=f"Станция назначения (Поезд {t_num})"
+            ).add_to(m)
+            # Линия
+            folium.PolyLine(
+                locations=[[f_lat, f_lon], [t_lat, t_lon]],
+                color="gray", weight=2, opacity=0.4, dash_array="5, 5"
+            ).add_to(m)
 
         lat, lon, _prog, _eta, _tot, _trv = train_position(
             t, simulation_enabled=simulation_enabled, now=now
@@ -69,7 +85,8 @@ def build_rail_map(center: tuple, trains: list, valid_ids: list,
             f"<b>Статус:</b> {status}<br>"
             f"<b>Маршрут:</b> {route}<br>"
             f"<b>Груз:</b> {cargo}<br>"
-            f"<b>Загрузка:</b> {teu_used}/{teu_cap} TEU"
+            f"<b>Загрузка:</b> {teu_used}/{teu_cap} TEU<br>"
+            f"<b>Прогресс:</b> {_prog * 100:.1f}%"
         )
         folium.Marker(
             location=[lat, lon],
@@ -92,16 +109,12 @@ def render_map(map_obj, height: int = 530):
 def build_single_train_map(train_row, popup_title: str = "Поезд",
                            now=None, simulation_enabled: bool = True):
     """
-    Карта с одной позицией (для клиента) — без остальных составов.
-    train_row: кортеж из find_request_by_tracker / get_train_by_id
-    Возвращает (map, progress, eta_min, total_km, traveled_km).
+    Карта с одной позицией (для клиента) + линия маршрута.
     """
-    # Разбираем кортеж: первые 9 полей — общие, дальше — маршрут
     (t_id, t_num, lat, lon, route, cargo,
      teu_cap, teu_used, src,
      f_lat, f_lon, t_lat, t_lon, speed, departed) = train_row
 
-    # Используем новую универсальную функцию из simulation.py
     lat, lon, prog, eta, tot, trv = train_position(
         train_row, simulation_enabled=simulation_enabled, now=now
     )
@@ -114,6 +127,15 @@ def build_single_train_map(train_row, popup_title: str = "Поезд",
         attr="© OpenStreetMap | OpenRailMap",
         name="ЖД", overlay=False,
     ).add_to(m)
+
+    # Отрисовка маршрута, если есть координаты
+    if all(v is not None for v in (f_lat, f_lon, t_lat, t_lon)):
+        folium.CircleMarker([f_lat, f_lon], radius=5, color="green", fill=True,
+                            popup="Станция отправления").add_to(m)
+        folium.CircleMarker([t_lat, t_lon], radius=5, color="red", fill=True,
+                            popup="Станция назначения").add_to(m)
+        folium.PolyLine([[f_lat, f_lon], [t_lat, t_lon]],
+                        color="blue", weight=3, opacity=0.5, dash_array="8, 8").add_to(m)
 
     folium.Marker(
         [lat, lon],

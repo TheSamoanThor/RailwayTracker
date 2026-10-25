@@ -21,7 +21,7 @@ from database import (
 )
 from geo_logic import filter_outliers
 from osm_client import find_station
-from simulation import position_at, train_position, simulation_now
+from simulation import position_at, train_position, simulation_now, haversine_km
 from ui_components import (
     build_rail_map, render_map, render_train_manifest,
     render_analytics_panel, render_client_tracking,
@@ -67,19 +67,25 @@ user = st.session_state.user
 # ═══════════════════════════════════════════════
 # БД + загрузка локального справочника станций
 # ═══════════════════════════════════════════════
-if "db_conn" not in st.session_state:
+@st.cache_resource(show_spinner=False)
+def get_db_connection():
+    """
+    Создает единое подключение к БД для всего приложения (кешируется Streamlit).
+    Это предотвращает утечку соединений при обновлении страниц или новых сессиях.
+    """
     conn = init_db()
-
+    
     # Локальный GeoJSON со станциями (офлайн-справочник).
     if os.path.exists(STATIONS_GEOJSON_PATH):
         n = load_stations_from_geojson(conn, STATIONS_GEOJSON_PATH)
         st.session_state["stations_loaded"] = n
     else:
         st.session_state["stations_loaded"] = 0
+        
+    return conn
 
-    st.session_state.db_conn = conn
-
-conn = st.session_state.db_conn
+# Получаем закешированное соединение
+conn = get_db_connection()
 
 # ═══════════════════════════════════════════════
 # ХЕДЕР: приветствие + выход
@@ -285,7 +291,7 @@ if user["role"] == "admin":
         n_stations = count_cached_stations(conn)
         if n_stations:
             st.caption(f"Локальный справочник станций: "
-                       f"**{n_stations}** записей (поиск без сети для них).")
+                       f"**{n_stations}** записей.")
         else:
             st.caption("Локальный справочник станций пуст — поиск идёт "
                        "через Nominatim/Overpass.")
@@ -294,73 +300,87 @@ if user["role"] == "admin":
             c1, c2 = st.columns(2)
             with c1:
                 new_num = st.text_input("Номер поезда:", placeholder="405Ш")
-                new_route = st.text_input(
-                    "Маршрут:", placeholder="Нахабино - Екатеринбург")
                 new_cargo = st.selectbox("Спецификация груза:", CARGO_TYPES)
+                new_teu = st.number_input("Ёмкость, TEU:", min_value=10, max_value=200, value=80)
             with c2:
-                new_teu = st.number_input("Ёмкость, TEU:", min_value=10,
-                                          max_value=200, value=80)
                 geo_mode = st.radio("Метод определения координат:",
-                                    ["Поиск станции (OSM)", "Ручной ввод"])
-                if geo_mode == "Поиск станции (OSM)":
-                    station_input = st.text_input(
-                        "Название ж/д станции:",
-                        placeholder="Нахабино, Ховрино, Люберцы, Омск...")
-                    manual_lat, manual_lon = 0.0, 0.0
-                else:
-                    station_input = ""
-                    manual_lat = st.number_input(
-                        "Широта:", min_value=40.0, max_value=80.0,
-                        value=55.04, format="%.4f")
-                    manual_lon = st.number_input(
-                        "Долгота:", min_value=19.0, max_value=180.0,
-                        value=82.90, format="%.4f")
+                                    ["Поиск станций (OSM)", "Ручной ввод"])
+
+            # Блок ввода данных о станциях
+            st.markdown("#### Маршрут следования")
+            if geo_mode == "Поиск станций (OSM)":
+                col_from, col_to = st.columns(2)
+                with col_from:
+                    from_station = st.text_input("Станция отправления:", placeholder="Владивосток...")
+                with col_to:
+                    to_station = st.text_input("Станция назначения:", placeholder="Москва...")
+                
+                # Заглушки для ручного ввода
+                m_from_lat, m_from_lon, m_to_lat, m_to_lon = 0.0, 0.0, 0.0, 0.0
+            else:
+                col_from, col_to = st.columns(2)
+                with col_from:
+                    from_station = st.text_input("Название станции отправления:", value="Пункт А")
+                    m_from_lat = st.number_input("Широта отпр.:", min_value=40.0, max_value=80.0, value=55.0, format="%.4f")
+                    m_from_lon = st.number_input("Долгота отпр.:", min_value=19.0, max_value=180.0, value=30.0, format="%.4f")
+                with col_to:
+                    to_station = st.text_input("Название станции назначения:", value="Пункт Б")
+                    m_to_lat = st.number_input("Широта назн.:", min_value=40.0, max_value=80.0, value=55.7, format="%.4f")
+                    m_to_lon = st.number_input("Долгота назн.:", min_value=19.0, max_value=180.0, value=37.6, format="%.4f")
 
             submit_train = st.form_submit_button("Сформировать состав")
 
             if submit_train:
-                if not new_num.strip() or not new_route.strip():
-                    st.warning("Номер поезда и маршрут обязательны.")
+                if not new_num.strip() or not from_station.strip() or not to_station.strip():
+                    st.warning("Номер поезда и названия обеих станций обязательны.")
+                elif from_station.strip().lower() == to_station.strip().lower():
+                    st.error("Станция отправления и назначения не могут совпадать.")
                 else:
-                    final_lat, final_lon, src = None, None, "manual"
-                    if geo_mode == "Поиск станции (OSM)":
-                        if not station_input.strip():
-                            st.error("Введите название станции.")
-                        else:
-                            with st.spinner(f"Поиск станции "
-                                            f"«{station_input}»..."):
-                                t0 = time.time()
-                                res = find_station(station_input.strip(),
-                                                   conn=conn)
-                                dt = time.time() - t0
-                            if res:
-                                final_lat, final_lon, src, disp = res
-                                st.success(
-                                    f"Станция найдена через **{src}** "
-                                    f"за {dt:.2f} с\n\n{disp}\n\n"
-                                    f"({final_lat:.4f}, {final_lon:.4f})")
-                            else:
-                                st.error(f"Станция «{station_input}» "
-                                         f"не найдена. Уточните название "
-                                         f"или используйте ручной ввод.")
-                    else:
-                        final_lat = manual_lat
-                        final_lon = manual_lon
-                        src = "manual"
+                    final_from_lat, final_from_lon, final_to_lat, final_to_lon = None, None, None, None
+                    src = "manual"
+                    
+                    if geo_mode == "Поиск станций (OSM)":
+                        with st.spinner("Поиск станции отправления..."):
+                            res_from = find_station(from_station.strip(), conn=conn)
+                        with st.spinner("Поиск станции назначения..."):
+                            res_to = find_station(to_station.strip(), conn=conn)
 
-                    if final_lat is not None:
-                        # Для симуляции: from = to = текущая точка
-                        # (поезд стоит на месте; расширяется формой маршрута).
+                        if res_from and res_to:
+                            final_from_lat, final_from_lon, src_from, disp_from = res_from
+                            final_to_lat, final_to_lon, src_to, disp_to = res_to
+                            src = f"{src_from} / {src_to}"
+                            st.success(f"Маршрут найден!")
+                            st.info(f"Отправление: {disp_from} ({final_from_lat:.4f}, {final_from_lon:.4f})\n\n"
+                                    f"Назначение: {disp_to} ({final_to_lat:.4f}, {final_to_lon:.4f})")
+                        else:
+                            missing = []
+                            if not res_from: missing.append(from_station)
+                            if not res_to: missing.append(to_station)
+                            st.error(f"Не найдены станции: {', '.join(missing)}. Используйте ручной ввод.")
+                    else:
+                        final_from_lat, final_from_lon = m_from_lat, m_from_lon
+                        final_to_lat, final_to_lon = m_to_lat, m_to_lon
+
+                    # ПРОВЕРКА НАЛИЧИЯ ПУТИ (эвристика)
+                    if final_from_lat is not None and final_to_lat is not None:
+                        dist_km = haversine_km(final_from_lat, final_from_lon, final_to_lat, final_to_lon)
+                        if dist_km < 1.0:
+                            st.error("Станции находятся слишком близко (менее 1 км). Поезду некуда ехать.")
+                        elif dist_km > 12000:
+                            st.warning(f"Расстояние по прямой очень велико ({dist_km:.0f} км). "
+                                       f"Проверьте правильность ввода координат.")
+                        
+                        # Сохраняем поезд
+                        route_string = f"{from_station.strip()} - {to_station.strip()}"
                         ok, msg = add_train(
-                            conn, new_num.strip(), final_lat, final_lon,
-                            new_route.strip(), new_cargo, new_teu, src,
-                            from_lat=final_lat, from_lon=final_lon,
-                            to_lat=final_lat, to_lon=final_lon,
+                            conn, new_num.strip(), final_from_lat, final_from_lon,
+                            route_string, new_cargo, new_teu, src,
+                            from_lat=final_from_lat, from_lon=final_from_lon,
+                            to_lat=final_to_lat, to_lon=final_to_lon,
                         )
                         if ok:
-                            st.success(f"Состав № {new_num} зарегистрирован "
-                                       f"({final_lat:.4f}, {final_lon:.4f}).")
-                            time.sleep(0.6)
+                            st.success(f"Состав № {new_num} зарегистрирован. Поезд в пути!")
+                            time.sleep(1.0)
                             st.rerun()
                         else:
                             st.error(msg)
@@ -368,9 +388,9 @@ if user["role"] == "admin":
         st.markdown("### Текущий парк составов")
         if raw_trains:
             st.dataframe(
-                [{"ID": t[0], "Номер": t[1], "Широта": t[2], "Долгота": t[3],
-                  "Маршрут": t[4], "Груз": t[5],
+                [{"ID": t[0], "Номер": t[1], "Маршрут": t[4], "Груз": t[5],
                   "Загрузка, TEU": f"{t[7]}/{t[6]}",
+                  "Скорость": f"{t[13]} км/ч",
                   "Источник координат": t[8]} for t in raw_trains],
                 width="stretch",
             )
