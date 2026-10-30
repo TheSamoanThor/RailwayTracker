@@ -18,6 +18,7 @@ from database import (
     get_wagons, add_wagon, get_train_by_id,
     load_stations_from_geojson, count_cached_stations,
     get_active_incident,
+    get_trains_missing_path, update_train_route_path,
 )
 from geo_logic import filter_outliers
 from osm_client import find_station
@@ -41,6 +42,9 @@ st.set_page_config(
 # ═══════════════════════════════════════════════
 # АУТЕНТИФИКАЦИЯ
 # ═══════════════════════════════════════════════
+###### DELETE TS AFTER TESTS!!!!!
+st.session_state.user = {"name": "admin", "role": "admin"}
+
 if "user" not in st.session_state:
     st.session_state.user = None
 
@@ -60,7 +64,7 @@ if st.session_state.user is None:
                 st.rerun()
             else:
                 st.error("Неверный логин или пароль.")
-    st.caption("Демо-учётки: admin / admin123, client / client123")
+    st.caption("Демо-учётки: admin / a, client / c")
     st.stop()
 
 user = st.session_state.user
@@ -94,6 +98,36 @@ def get_db_connection():
 
 # Получаем закешированное соединение
 conn = get_db_connection()
+
+
+# ═══════════════════════════════════════════════
+# Бэкфилл route_path для демо-составов
+# (прокладывает реальные ЖД-маршруты для сидов,
+#  у которых route_path ещё NULL)
+# ═══════════════════════════════════════════════
+
+@st.cache_resource(show_spinner="Прокладка ЖД-маршрутов для демо-составов...")
+def backfill_seed_routes(_conn, _graph):
+    """
+    Одноразовая (на процесс) операция: находит поезда с route_path IS NULL
+    и валидными from/to координатами, прокладывает маршрут через RailGraph
+    и сохраняет в БД. Возвращает число исправленных составов.
+    """
+    fixed = 0
+    skipped = 0
+    for tid, f_lat, f_lon, t_lat, t_lon in get_trains_missing_path(_conn):
+        coords = _graph.get_rail_route(f_lat, f_lon, t_lat, t_lon)
+        if coords and len(coords) >= 2:
+            update_train_route_path(_conn, tid, coords)
+            fixed += 1
+        else:
+            skipped += 1
+    return fixed, skipped
+
+
+# Выполняем один раз за жизнь процесса (кеш на _conn/_graph)
+_backfill_fixed, _backfill_skipped = backfill_seed_routes(conn, rail_graph)
+
 
 # ═══════════════════════════════════════════════
 # ХЕДЕР: приветствие + выход
