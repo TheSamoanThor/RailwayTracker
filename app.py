@@ -42,8 +42,6 @@ st.set_page_config(
 # ═══════════════════════════════════════════════
 # АУТЕНТИФИКАЦИЯ
 # ═══════════════════════════════════════════════
-###### DELETE TS AFTER TESTS!!!!!
-st.session_state.user = {"name": "admin", "role": "admin"}
 
 if "user" not in st.session_state:
     st.session_state.user = None
