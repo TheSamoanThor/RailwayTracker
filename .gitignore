@@ -31,3 +31,7 @@ data/README.txt
 data/config.yaml
 data/config.yml
 data/metadata.json
+
+# java (ew)
+*.class
+*.jar

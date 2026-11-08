@@ -30,6 +30,14 @@ from ui_components import (
 )
 from routing import RailGraph
 
+try:
+    from java_geo_bridge import filter_outliers_java, is_java_available
+    JAVA_OK = is_java_available()
+except Exception:
+    JAVA_OK = False
+    filter_outliers_java = None
+
+
 # ═══════════════════════════════════════════════
 # Настройка страницы
 # ═══════════════════════════════════════════════
@@ -181,33 +189,53 @@ if user["role"] == "admin":
         "Аномалии",
     ])
 
-    # ---- Вкладка 1: Мониторинг ----
+        # ---- Вкладка 1: Мониторинг ----
     with tab_monitor:
+        # ── 1. Панель параметров (рисуем ДО карты, чтобы получить multiplier и selected)
+        # и СРАЗУ считаем фильтрацию нужной реализацией — один раз, без дублей.
+        ctrl1, ctrl2 = st.columns(2)
+        with ctrl1:
+            multiplier = st.slider(
+                "Множитель расстояния (multiplier)",
+                min_value=0.1, max_value=3.0, value=1.0, step=0.1,
+            )
+            use_java = False
+            if JAVA_OK:
+                use_java = st.toggle(
+                    "Использовать Java-модуль (OOP)",
+                    value=False,
+                    help="Java-реализация filter_outliers через JPype. "
+                         "Работает только при установленном JDK 17+.",
+                )
+            else:
+                st.caption("JDK не найден — используется Python-реализация.")
+        with ctrl2:
+            train_numbers = ["Все"] + [str(t[1]) for t in raw_trains]
+            selected = st.selectbox(
+                "Выберите номер поезда для вывода манифеста:",
+                train_numbers,
+            )
+
+        # Единственный вызов фильтрации за итерацию Streamlit.
+        # Ниже карта и аналитика используют ЭТИ ЖЕ valid_ids — без пересчёта.
+        filter_fn = filter_outliers_java if use_java else filter_outliers
+        try:
+            valid_ids, center, threshold, avg_dist = filter_fn(
+                points_for_algo, multiplier
+            )
+        except Exception as exc:
+            st.warning(
+                f"Java-модуль вернул ошибку: {exc}. "
+                "Откатываемся на Python-реализацию."
+            )
+            valid_ids, center, threshold, avg_dist = filter_outliers(
+                points_for_algo, multiplier
+            )
+
+        # ── 2. Основные колонки (карта + аналитика)
         col1, col2 = st.columns([3, 1])
-        
-        with col2:
-            # Сначала рендерим элементы управления, чтобы получить multiplier и selected
-            st.subheader("Параметры фильтрации и поиска")
-            c1, c2 = st.columns(2)
-            with c1:
-                multiplier = st.slider(
-                    "Множитель расстояния (multiplier)",
-                    min_value=0.1, max_value=3.0, value=1.0, step=0.1,
-                )
-            with c2:
-                train_numbers = ["Все"] + [str(t[1]) for t in raw_trains]
-                selected = st.selectbox(
-                    "Выберите номер поезда для вывода манифеста:",
-                    train_numbers,
-                )
-        
-        # пересчитываем фильтрацию на основе полученного multiplier до рендеринга карты и аналитики!
-        valid_ids, center, threshold, avg_dist = filter_outliers(
-            points_for_algo, multiplier
-        )
-        
+
         with col1:
-            # Теперь строим карту — все переменные гарантированно инициализированы
             st.subheader("Интерактивная карта движения")
             m = build_rail_map(
                 center, raw_trains, valid_ids,
@@ -216,48 +244,50 @@ if user["role"] == "admin":
                 simulation_enabled=st.session_state.simulation_enabled,
             )
             render_map(m)
-            
+
             # Элементы управления временем симуляции
-            st.markdown("---")  # Отделим визуально карту от кнопок
-
-            # Задаем очень маленькие веса колонкам, чтобы элементы прижались друг к другу
-            c_toggle, c_input, c_minus, c_plus, c_reset = st.columns([1.5, 1.8, 0.7, 0.7, 1.0])
-
+            st.markdown("---")
+            c_toggle, c_input, c_minus, c_plus, c_reset = st.columns(
+                [1.5, 1.8, 0.7, 0.7, 1.0]
+            )
             with c_toggle:
-                # Используем контейнер, чтобы выровнять по высоте с кнопками (чуть опустить переключатель)
-                st.markdown("<div style='padding-top: 25px;'></div>", unsafe_allow_html=True)
+                st.markdown("<div style='padding-top: 25px;'></div>",
+                            unsafe_allow_html=True)
                 st.toggle("Симуляция движения", key="simulation_enabled")
-
             with c_input:
                 st.number_input(
                     "Сдвиг времени, мин",
                     min_value=-10080, max_value=10080, step=30,
                     key="sim_offset_min",
                 )
-
             with c_minus:
-                st.markdown("<div style='padding-top: 24px;'></div>", unsafe_allow_html=True)
-                st.button("-1 ч", on_click=_shift_sim_time, args=(-60,), use_container_width=True)
-
+                st.markdown("<div style='padding-top: 24px;'></div>",
+                            unsafe_allow_html=True)
+                st.button("-1 ч", on_click=_shift_sim_time, args=(-60,),
+                          use_container_width=True)
             with c_plus:
-                st.markdown("<div style='padding-top: 24px;'></div>", unsafe_allow_html=True)
-                st.button("+1 ч", on_click=_shift_sim_time, args=(60,), use_container_width=True)
-
+                st.markdown("<div style='padding-top: 24px;'></div>",
+                            unsafe_allow_html=True)
+                st.button("+1 ч", on_click=_shift_sim_time, args=(60,),
+                          use_container_width=True)
             with c_reset:
-                st.markdown("<div style='padding-top: 24px;'></div>", unsafe_allow_html=True)
-                st.button("Сбросить", on_click=_reset_sim_time, use_container_width=True)
+                st.markdown("<div style='padding-top: 24px;'></div>",
+                            unsafe_allow_html=True)
+                st.button("Сбросить", on_click=_reset_sim_time,
+                          use_container_width=True)
 
-            
         with col2:
-            # Выводим аналитику и манифест (они используют актуальные valid_ids)
             render_analytics_panel(raw_trains, valid_ids, threshold, avg_dist)
-            
+
             if selected != "Все":
                 target = next((t for t in raw_trains if str(t[1]) == selected), None)
                 if target:
                     render_train_manifest(target, target[0] in valid_ids)
                 else:
-                    st.warning("Выбранный состав не найден. Возможно, база данных обновилась.")
+                    st.warning(
+                        "Выбранный состав не найден. "
+                        "Возможно, база данных обновилась."
+                    )
             else:
                 st.write("*Выберите поезд для вывода манифеста.*")
 
