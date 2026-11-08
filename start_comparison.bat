@@ -12,6 +12,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
-python benchmark_compare.py
+echo Тестируем время исполнения
+
+python benchmark_time.py
+
+echo Тестируем потребление памяти
+
+python benchmark_memory.py
 
 pause
